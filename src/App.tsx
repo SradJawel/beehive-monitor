@@ -20,11 +20,11 @@ interface Hive {
 interface Reading {
   id: number;
   hive_id: number;
-  temperature: number;
-  humidity: number;
-  weight: number;
-  battery_voltage: number;
-  battery_percent: number;
+  temperature: number | null;
+  humidity: number | null;
+  weight: number | null;
+  battery_voltage: number | null;
+  battery_percent: number | null;
   recorded_at: string;
 }
 
@@ -38,8 +38,8 @@ interface LvdSettings {
 
 interface LvdStatus {
   id: number;
-  battery_voltage: number;
-  battery_percent: number;
+  battery_voltage: number | null;
+  battery_percent: number | null;
   is_connected: boolean;
   recorded_at: string;
 }
@@ -48,6 +48,13 @@ interface User {
   id: number;
   username: string;
   password: string;
+}
+
+interface TodayReading {
+  reading: Reading;
+  label: string;
+  icon: string;
+  time: string;
 }
 
 // ============================================
@@ -84,22 +91,56 @@ function timeAgo(date: string): string {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 
+function formatTime(date: string): string {
+  return new Date(date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function isToday(date: string): boolean {
+  const today = new Date();
+  const readingDate = new Date(date);
+  return today.toDateString() === readingDate.toDateString();
+}
+
+function getReadingLabel(index: number): { label: string; icon: string } {
+  switch (index) {
+    case 0: return { label: 'Morning', icon: '🌅' };
+    case 1: return { label: 'Afternoon', icon: '☀️' };
+    case 2: return { label: 'Night', icon: '🌙' };
+    default: return { label: `Reading ${index + 1}`, icon: '📊' };
+  }
+}
+
 function isOnline(lastReading: string | null): boolean {
   if (!lastReading) return false;
   const diff = Date.now() - new Date(lastReading).getTime();
-  return diff < 12 * 60 * 60 * 1000; // 12 hours (since we read 3x daily)
+  return diff < 12 * 60 * 60 * 1000; // 12 hours
 }
 
-function getBatteryColor(percent: number): string {
+function getBatteryColor(percent: number | null): string {
+  if (percent === null) return 'text-gray-400';
   if (percent > 60) return 'text-green-400';
   if (percent > 30) return 'text-yellow-400';
   return 'text-red-400';
 }
 
-function getTempColor(temp: number): string {
+function getBatteryIcon(percent: number | null): string {
+  if (percent === null) return '🔋';
+  if (percent > 75) return '🔋';
+  if (percent > 50) return '🔋';
+  if (percent > 25) return '🪫';
+  return '🪫';
+}
+
+function getTempColor(temp: number | null): string {
+  if (temp === null) return 'text-gray-400';
   if (temp > 38) return 'text-red-400';
   if (temp > 35) return 'text-yellow-400';
   return 'text-green-400';
+}
+
+function displayValue(value: number | null | undefined, unit: string = ''): string {
+  if (value === null || value === undefined) return '--';
+  return `${value}${unit}`;
 }
 
 // ============================================
@@ -236,14 +277,15 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
 // ============================================
 function Dashboard({ onSelectHive }: { onSelectHive: (id: number) => void }) {
   const [hives, setHives] = useState<Hive[]>([]);
-  const [readings, setReadings] = useState<Record<number, Reading | null>>({});
+  const [todayReadings, setTodayReadings] = useState<Record<number, TodayReading[]>>({});
+  const [latestReadings, setLatestReadings] = useState<Record<number, Reading | null>>({});
   const [lvdStatus, setLvdStatus] = useState<LvdStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 60000); // Refresh every minute
+    const interval = setInterval(loadData, 60000);
     return () => clearInterval(interval);
   }, []);
 
@@ -252,12 +294,37 @@ function Dashboard({ onSelectHive }: { onSelectHive: (id: number) => void }) {
       const hivesData = await supabaseFetch('hives?order=id');
       setHives(hivesData || []);
 
-      const readingsData: Record<number, Reading | null> = {};
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+
+      const todayReadingsMap: Record<number, TodayReading[]> = {};
+      const latestReadingsMap: Record<number, Reading | null> = {};
+
       for (const hive of hivesData || []) {
-        const r = await supabaseFetch(`readings?hive_id=eq.${hive.id}&order=recorded_at.desc&limit=1`);
-        readingsData[hive.id] = r && r.length > 0 ? r[0] : null;
+        // Get today's readings
+        const todayData = await supabaseFetch(
+          `readings?hive_id=eq.${hive.id}&recorded_at=gte.${todayStart.toISOString()}&order=recorded_at.asc`
+        );
+        
+        todayReadingsMap[hive.id] = (todayData || []).map((r: Reading, index: number) => {
+          const { label, icon } = getReadingLabel(index);
+          return {
+            reading: r,
+            label,
+            icon,
+            time: formatTime(r.recorded_at)
+          };
+        });
+
+        // Get latest reading
+        const latest = await supabaseFetch(
+          `readings?hive_id=eq.${hive.id}&order=recorded_at.desc&limit=1`
+        );
+        latestReadingsMap[hive.id] = latest && latest.length > 0 ? latest[0] : null;
       }
-      setReadings(readingsData);
+
+      setTodayReadings(todayReadingsMap);
+      setLatestReadings(latestReadingsMap);
 
       const status = await supabaseFetch('lvd_status?order=recorded_at.desc&limit=1');
       setLvdStatus(status && status.length > 0 ? status[0] : null);
@@ -317,20 +384,20 @@ function Dashboard({ onSelectHive }: { onSelectHive: (id: number) => void }) {
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <p className={`text-2xl font-bold ${getBatteryColor(lvdStatus.battery_percent || 0)}`}>
-                {lvdStatus.battery_percent || 0}%
+              <p className={`text-2xl font-bold ${getBatteryColor(lvdStatus.battery_percent)}`}>
+                {displayValue(lvdStatus.battery_percent, '%')}
               </p>
-              <p className="text-gray-400 text-sm">🔋 Battery</p>
+              <p className="text-gray-400 text-sm">{getBatteryIcon(lvdStatus.battery_percent)} Battery</p>
             </div>
             <div>
-              <p className="text-2xl font-bold text-blue-400">{lvdStatus.battery_voltage || 0}V</p>
+              <p className="text-2xl font-bold text-blue-400">{displayValue(lvdStatus.battery_voltage, 'V')}</p>
               <p className="text-gray-400 text-sm">⚡ Voltage</p>
             </div>
           </div>
         </div>
       )}
 
-      {/* Hives Grid */}
+      {/* Hives */}
       <div className="p-4 space-y-4">
         <h2 className="text-lg font-bold text-gray-400">Hives</h2>
 
@@ -340,64 +407,128 @@ function Dashboard({ onSelectHive }: { onSelectHive: (id: number) => void }) {
             <p className="mt-4 text-gray-400">No hives found</p>
           </div>
         ) : (
-          <div className="grid gap-4">
+          <div className="space-y-4">
             {hives.map((hive) => {
-              const reading = readings[hive.id];
-              const online = isOnline(reading?.recorded_at || null);
+              const today = todayReadings[hive.id] || [];
+              const latest = latestReadings[hive.id];
+              const online = isOnline(latest?.recorded_at || null);
 
               return (
                 <div
                   key={hive.id}
-                  onClick={() => onSelectHive(hive.id)}
-                  className="bg-gray-800 rounded-xl p-4 cursor-pointer hover:bg-gray-750 active:scale-[0.98] transition-all"
+                  className="bg-gray-800 rounded-xl overflow-hidden"
                 >
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2">
-                      <span className="text-2xl">🏠</span>
-                      <div>
-                        <h3 className="font-bold">{hive.name}</h3>
-                        <p className="text-gray-400 text-sm">
-                          {reading ? timeAgo(reading.recorded_at) : 'No data'}
-                        </p>
+                  {/* Hive Header - Clickable */}
+                  <div
+                    onClick={() => onSelectHive(hive.id)}
+                    className="p-4 cursor-pointer hover:bg-gray-750 active:scale-[0.99] transition-all"
+                  >
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-2xl">🏠</span>
+                        <div>
+                          <h3 className="font-bold">{hive.name}</h3>
+                          <p className="text-gray-400 text-sm">
+                            {latest ? timeAgo(latest.recorded_at) : 'No data'}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={`w-3 h-3 rounded-full ${online ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
+                        <span className="text-sm text-gray-400">{online ? 'Online' : 'Offline'}</span>
+                        <span className="text-gray-600">›</span>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <span className={`w-3 h-3 rounded-full ${online ? 'bg-green-500' : 'bg-red-500'}`}></span>
-                      <span className="text-sm text-gray-400">{online ? 'Online' : 'Offline'}</span>
-                      <span className="text-gray-600">›</span>
-                    </div>
+
+                    {/* Latest Reading Summary */}
+                    {latest && (
+                      <div className="grid grid-cols-4 gap-2 text-center">
+                        <div className="bg-gray-700/50 rounded-lg p-2">
+                          <p className={`text-lg font-bold ${getTempColor(latest.temperature)}`}>
+                            {displayValue(latest.temperature, '°')}
+                          </p>
+                          <p className="text-gray-400 text-xs">🌡️ Temp</p>
+                        </div>
+                        <div className="bg-gray-700/50 rounded-lg p-2">
+                          <p className="text-lg font-bold text-blue-400">
+                            {displayValue(latest.humidity, '%')}
+                          </p>
+                          <p className="text-gray-400 text-xs">💧 Humid</p>
+                        </div>
+                        <div className="bg-gray-700/50 rounded-lg p-2">
+                          <p className="text-lg font-bold text-purple-400">
+                            {displayValue(latest.weight, 'kg')}
+                          </p>
+                          <p className="text-gray-400 text-xs">⚖️ Weight</p>
+                        </div>
+                        <div className="bg-gray-700/50 rounded-lg p-2">
+                          <p className={`text-lg font-bold ${getBatteryColor(latest.battery_percent)}`}>
+                            {displayValue(latest.battery_percent, '%')}
+                          </p>
+                          <p className="text-gray-400 text-xs">{getBatteryIcon(latest.battery_percent)} Batt</p>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
-                  {reading ? (
-                    <div className="grid grid-cols-4 gap-2 text-center">
-                      <div className="bg-gray-700/50 rounded-lg p-2">
-                        <p className={`text-lg font-bold ${getTempColor(reading.temperature || 0)}`}>
-                          {reading.temperature || '--'}°
-                        </p>
-                        <p className="text-gray-400 text-xs">🌡️ Temp</p>
+                  {/* Today's Readings */}
+                  <div className="border-t border-gray-700 p-4 bg-gray-800/50">
+                    <p className="text-gray-400 text-sm mb-3">📅 Today's Readings ({today.length}/3)</p>
+                    
+                    {today.length === 0 ? (
+                      <div className="flex justify-center gap-4">
+                        {[0, 1, 2].map((i) => {
+                          const { label, icon } = getReadingLabel(i);
+                          return (
+                            <div key={i} className="text-center opacity-30">
+                              <div className="w-16 h-16 bg-gray-700 rounded-full flex items-center justify-center mb-1">
+                                <span className="text-2xl">{icon}</span>
+                              </div>
+                              <p className="text-xs text-gray-500">{label}</p>
+                              <p className="text-xs text-gray-600">--:--</p>
+                            </div>
+                          );
+                        })}
                       </div>
-                      <div className="bg-gray-700/50 rounded-lg p-2">
-                        <p className="text-lg font-bold text-blue-400">
-                          {reading.humidity || '--'}%
-                        </p>
-                        <p className="text-gray-400 text-xs">💧 Humid</p>
+                    ) : (
+                      <div className="flex justify-center gap-4">
+                        {[0, 1, 2].map((i) => {
+                          const reading = today[i];
+                          const { label, icon } = getReadingLabel(i);
+                          const isRecorded = !!reading;
+
+                          return (
+                            <div key={i} className={`text-center ${!isRecorded ? 'opacity-30' : ''}`}>
+                              <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-1 ${
+                                isRecorded ? 'bg-amber-500/20 border-2 border-amber-500' : 'bg-gray-700'
+                              }`}>
+                                <div className="text-center">
+                                  <span className="text-xl">{icon}</span>
+                                  {isRecorded && (
+                                    <p className={`text-xs font-bold ${getTempColor(reading.reading.temperature)}`}>
+                                      {displayValue(reading.reading.temperature, '°')}
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                              <p className="text-xs text-gray-400">{label}</p>
+                              <p className="text-xs text-gray-500">
+                                {isRecorded ? reading.time : '--:--'}
+                              </p>
+                              {isRecorded && (
+                                <div className="flex justify-center gap-1 mt-1">
+                                  <span className="text-xs text-purple-400">{displayValue(reading.reading.weight, 'kg')}</span>
+                                  <span className={`text-xs ${getBatteryColor(reading.reading.battery_percent)}`}>
+                                    {displayValue(reading.reading.battery_percent, '%')}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
-                      <div className="bg-gray-700/50 rounded-lg p-2">
-                        <p className="text-lg font-bold text-purple-400">
-                          {reading.weight || '--'}kg
-                        </p>
-                        <p className="text-gray-400 text-xs">⚖️ Weight</p>
-                      </div>
-                      <div className="bg-gray-700/50 rounded-lg p-2">
-                        <p className={`text-lg font-bold ${getBatteryColor(reading.battery_percent || 0)}`}>
-                          {reading.battery_percent || '--'}%
-                        </p>
-                        <p className="text-gray-400 text-xs">🔋 Batt</p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-center text-gray-500 py-4">No readings yet</div>
-                  )}
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -426,7 +557,7 @@ function HiveDetail({ hiveId, onBack }: { hiveId: number; onBack: () => void }) 
       const hiveData = await supabaseFetch(`hives?id=eq.${hiveId}`);
       setHive(hiveData && hiveData.length > 0 ? hiveData[0] : null);
 
-      const limit = period === '7d' ? 21 : period === '30d' ? 90 : 270; // 3 readings per day
+      const limit = period === '7d' ? 21 : period === '30d' ? 90 : 270;
       const readingsData = await supabaseFetch(`readings?hive_id=eq.${hiveId}&order=recorded_at.desc&limit=${limit}`);
       setReadings(readingsData || []);
     } catch (err) {
@@ -463,27 +594,36 @@ function HiveDetail({ hiveId, onBack }: { hiveId: number; onBack: () => void }) 
       {/* Current Reading */}
       {latestReading && (
         <div className="bg-gray-800 mx-4 mt-4 rounded-xl p-4">
-          <h2 className="text-gray-400 text-sm mb-3">Current Reading</h2>
-          <div className="grid grid-cols-4 gap-2 text-center">
-            <div>
-              <p className={`text-2xl font-bold ${getTempColor(latestReading.temperature || 0)}`}>
-                {latestReading.temperature || '--'}°
+          <h2 className="text-gray-400 text-sm mb-3">📊 Current Reading</h2>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-gray-700/50 rounded-lg p-3 text-center">
+              <p className={`text-3xl font-bold ${getTempColor(latestReading.temperature)}`}>
+                {displayValue(latestReading.temperature, '°C')}
               </p>
-              <p className="text-gray-400 text-xs">🌡️ Temp</p>
+              <p className="text-gray-400 text-sm mt-1">🌡️ Temperature</p>
             </div>
-            <div>
-              <p className="text-2xl font-bold text-blue-400">{latestReading.humidity || '--'}%</p>
-              <p className="text-gray-400 text-xs">💧 Humid</p>
-            </div>
-            <div>
-              <p className="text-2xl font-bold text-purple-400">{latestReading.weight || '--'}kg</p>
-              <p className="text-gray-400 text-xs">⚖️ Weight</p>
-            </div>
-            <div>
-              <p className={`text-2xl font-bold ${getBatteryColor(latestReading.battery_percent || 0)}`}>
-                {latestReading.battery_percent || '--'}%
+            <div className="bg-gray-700/50 rounded-lg p-3 text-center">
+              <p className="text-3xl font-bold text-blue-400">
+                {displayValue(latestReading.humidity, '%')}
               </p>
-              <p className="text-gray-400 text-xs">🔋 Batt</p>
+              <p className="text-gray-400 text-sm mt-1">💧 Humidity</p>
+            </div>
+            <div className="bg-gray-700/50 rounded-lg p-3 text-center">
+              <p className="text-3xl font-bold text-purple-400">
+                {displayValue(latestReading.weight, 'kg')}
+              </p>
+              <p className="text-gray-400 text-sm mt-1">⚖️ Weight</p>
+            </div>
+            <div className="bg-gray-700/50 rounded-lg p-3 text-center">
+              <p className={`text-3xl font-bold ${getBatteryColor(latestReading.battery_percent)}`}>
+                {displayValue(latestReading.battery_percent, '%')}
+              </p>
+              <p className="text-gray-400 text-sm mt-1">
+                {getBatteryIcon(latestReading.battery_percent)} Battery
+                <span className="text-xs text-gray-500 block">
+                  ({displayValue(latestReading.battery_voltage, 'V')})
+                </span>
+              </p>
             </div>
           </div>
           <p className="text-center text-gray-500 text-sm mt-3">
@@ -508,27 +648,34 @@ function HiveDetail({ hiveId, onBack }: { hiveId: number; onBack: () => void }) 
       {/* Chart */}
       <div className="bg-gray-800 mx-4 rounded-xl p-4">
         <h2 className="text-gray-400 text-sm mb-3">📈 Temperature History</h2>
-        <div className="h-40 flex items-end gap-1">
-          {chartData.map((r, i) => {
-            const minTemp = Math.min(...chartData.map((x) => x.temperature || 0));
-            const maxTemp = Math.max(...chartData.map((x) => x.temperature || 0));
-            const range = maxTemp - minTemp || 1;
-            const height = (((r.temperature || 0) - minTemp) / range) * 100;
+        {chartData.length > 0 ? (
+          <>
+            <div className="h-40 flex items-end gap-1">
+              {chartData.map((r, i) => {
+                const temps = chartData.map((x) => x.temperature || 0);
+                const minTemp = Math.min(...temps);
+                const maxTemp = Math.max(...temps);
+                const range = maxTemp - minTemp || 1;
+                const height = (((r.temperature || 0) - minTemp) / range) * 100;
 
-            return (
-              <div
-                key={i}
-                className="flex-1 bg-amber-500 rounded-t"
-                style={{ height: `${Math.max(height, 5)}%` }}
-                title={`${r.temperature}°C at ${new Date(r.recorded_at).toLocaleString()}`}
-              />
-            );
-          })}
-        </div>
-        {chartData.length > 0 && (
-          <div className="flex justify-between text-gray-500 text-xs mt-2">
-            <span>{chartData[0]?.temperature}°C</span>
-            <span>{chartData[chartData.length - 1]?.temperature}°C</span>
+                return (
+                  <div
+                    key={i}
+                    className="flex-1 bg-amber-500 rounded-t hover:bg-amber-400 transition-colors"
+                    style={{ height: `${Math.max(height, 5)}%` }}
+                    title={`${r.temperature}°C at ${new Date(r.recorded_at).toLocaleString()}`}
+                  />
+                );
+              })}
+            </div>
+            <div className="flex justify-between text-gray-500 text-xs mt-2">
+              <span>{chartData[0]?.temperature}°C</span>
+              <span>{chartData[chartData.length - 1]?.temperature}°C</span>
+            </div>
+          </>
+        ) : (
+          <div className="h-40 flex items-center justify-center text-gray-500">
+            No data available
           </div>
         )}
       </div>
@@ -537,17 +684,26 @@ function HiveDetail({ hiveId, onBack }: { hiveId: number; onBack: () => void }) 
       <div className="bg-gray-800 mx-4 mt-4 rounded-xl p-4">
         <h2 className="text-gray-400 text-sm mb-3">📋 Recent Readings</h2>
         <div className="space-y-2 max-h-60 overflow-y-auto">
-          {readings.slice(0, 20).map((r, i) => (
-            <div key={i} className="flex justify-between items-center bg-gray-700/50 p-2 rounded">
-              <span className="text-gray-400 text-sm">{timeAgo(r.recorded_at)}</span>
-              <div className="flex gap-3 text-sm">
-                <span className="text-green-400">{r.temperature || '--'}°</span>
-                <span className="text-blue-400">{r.humidity || '--'}%</span>
-                <span className="text-purple-400">{r.weight || '--'}kg</span>
-                <span className={getBatteryColor(r.battery_percent || 0)}>{r.battery_percent || '--'}%</span>
+          {readings.length === 0 ? (
+            <p className="text-center text-gray-500 py-4">No readings yet</p>
+          ) : (
+            readings.slice(0, 30).map((r, i) => (
+              <div key={i} className="flex justify-between items-center bg-gray-700/50 p-2 rounded text-sm">
+                <div>
+                  <span className="text-gray-400">{timeAgo(r.recorded_at)}</span>
+                  {isToday(r.recorded_at) && (
+                    <span className="ml-2 text-xs bg-amber-500/20 text-amber-400 px-1 rounded">Today</span>
+                  )}
+                </div>
+                <div className="flex gap-3">
+                  <span className={getTempColor(r.temperature)}>{displayValue(r.temperature, '°')}</span>
+                  <span className="text-blue-400">{displayValue(r.humidity, '%')}</span>
+                  <span className="text-purple-400">{displayValue(r.weight, 'kg')}</span>
+                  <span className={getBatteryColor(r.battery_percent)}>{displayValue(r.battery_percent, '%')}</span>
+                </div>
               </div>
-            </div>
-          ))}
+            ))
+          )}
         </div>
       </div>
     </div>
@@ -587,10 +743,12 @@ function ExportPage({ onBack }: { onBack: () => void }) {
       if (endDate) query += `&recorded_at=lte.${endDate}T23:59:59`;
 
       const readings = await supabaseFetch(query);
+      const hivesData = await supabaseFetch('hives');
 
-      let csv = 'Hive ID,Temperature (°C),Humidity (%),Weight (kg),Battery (%),Battery (V),Recorded At\n';
+      let csv = 'Hive,Temperature (°C),Humidity (%),Weight (kg),Battery (%),Battery (V),Recorded At\n';
       readings.forEach((r: Reading) => {
-        csv += `${r.hive_id},${r.temperature || ''},${r.humidity || ''},${r.weight || ''},${r.battery_percent || ''},${r.battery_voltage || ''},${r.recorded_at}\n`;
+        const hive = hivesData.find((h: Hive) => h.id === r.hive_id);
+        csv += `${hive?.name || r.hive_id},${r.temperature || ''},${r.humidity || ''},${r.weight || ''},${r.battery_percent || ''},${r.battery_voltage || ''},${r.recorded_at}\n`;
       });
 
       const blob = new Blob([csv], { type: 'text/csv' });
@@ -601,7 +759,7 @@ function ExportPage({ onBack }: { onBack: () => void }) {
       a.click();
       window.URL.revokeObjectURL(url);
 
-      setMessage('✅ CSV downloaded successfully!');
+      setMessage(`✅ Exported ${readings.length} readings!`);
     } catch (err) {
       setMessage('❌ Export failed: ' + String(err));
     } finally {
@@ -772,7 +930,7 @@ function SettingsPage({ user, onBack, onLogout }: { user: User; onBack: () => vo
 
   const copyApiKey = (key: string) => {
     navigator.clipboard.writeText(key);
-    setMessage('✅ API key copied to clipboard!');
+    setMessage('✅ API key copied!');
     setTimeout(() => setMessage(''), 2000);
   };
 
@@ -817,7 +975,7 @@ function SettingsPage({ user, onBack, onLogout }: { user: User; onBack: () => vo
 
         {/* API Keys */}
         <div className="bg-gray-800 rounded-xl p-4">
-          <h2 className="font-bold mb-4">🔑 API Keys (for ESP8266)</h2>
+          <h2 className="font-bold mb-4">🔑 API Keys</h2>
           <div className="space-y-3">
             {hives.map((hive) => (
               <div key={hive.id} className="flex items-center gap-2">
