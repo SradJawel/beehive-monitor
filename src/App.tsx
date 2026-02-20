@@ -916,7 +916,7 @@ export default function App() {
                       {reading?.temperature?.toFixed(1) || '--'}°
                     </div>
                     <div className="text-xs text-gray-400">🌡️ Temp</div>
-                  </div>
+                  </div>      
                   <div className="bg-gray-50 rounded-lg p-2">
                     <div className="text-xl font-bold text-blue-500">
                       {reading?.humidity?.toFixed(0) || '--'}%
