@@ -1,222 +1,223 @@
-/**
- * API Client for Bee Hive Backend
- */
+// Supabase API Configuration
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://mafzunpomznrjvdxvknc.supabase.co';
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
-import { API_URL } from './config';
-
-// Types
-export interface User {
-  id: number;
-  username: string;
-}
-
-export interface Hive {
-  id: number;
-  name: string;
-  api_key?: string;
-  sensor_mode: number;
-  is_active: boolean;
-  is_online: boolean;
-  seconds_ago: number | null;
-  latest: Reading | null;
-  readings?: Reading[];
-  stats?: HiveStats;
-}
-
-export interface Reading {
-  id: number;
-  hive_id: number;
-  hive_name?: string;
-  mcp_temp: number | null;
-  hdc_temp: number | null;
-  hdc_humidity: number | null;
-  weight_kg: number | null;
-  recorded_at: string;
-  is_online?: boolean;
-  seconds_ago?: number;
-}
-
-export interface HiveStats {
-  temp: { avg: number | null; min: number | null; max: number | null };
-  humidity: { avg: number | null };
-  weight: { avg: number | null };
-  readings_count: number;
-}
-
-export interface LVDData {
-  id?: number;
-  battery_voltage: number;
-  battery_percent: number;
-  lvd_status: boolean;
-  solar_voltage: number | null;
-  recorded_at?: string;
-  is_online?: boolean;
-}
-
-export interface LVDSettings {
-  disconnect_volt: number;
-  reconnect_volt: number;
-  lvd_enabled: boolean;
-}
-
-export interface ApiResponse<T> {
-  status: 'ok' | 'error';
-  message?: string;
-  [key: string]: T | string | undefined;
-}
-
-// Token management
-let authToken: string | null = localStorage.getItem('beehive_token');
-
-export const setToken = (token: string | null) => {
-  authToken = token;
-  if (token) {
-    localStorage.setItem('beehive_token', token);
-  } else {
-    localStorage.removeItem('beehive_token');
-  }
-};
-
-export const getToken = () => authToken;
-
-// Fetch wrapper
-async function fetchApi<T>(
-  endpoint: string, 
-  options: RequestInit = {}
-): Promise<T> {
-  const headers: HeadersInit = {
+// Helper function for Supabase requests
+async function supabaseRequest(table: string, options: {
+  method?: string;
+  body?: unknown;
+  query?: string;
+} = {}) {
+  const { method = 'GET', body, query = '' } = options;
+  
+  const url = `${SUPABASE_URL}/rest/v1/${table}${query ? `?${query}` : ''}`;
+  
+  const headers: Record<string, string> = {
+    'apikey': SUPABASE_ANON_KEY,
+    'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
     'Content-Type': 'application/json',
-    ...options.headers,
+    'Prefer': method === 'POST' ? 'return=representation' : 'return=minimal'
   };
-  
-  if (authToken) {
-    (headers as Record<string, string>)['Authorization'] = `Bearer ${authToken}`;
-  }
-  
-  const response = await fetch(`${API_URL}${endpoint}`, {
-    ...options,
+
+  const response = await fetch(url, {
+    method,
     headers,
+    body: body ? JSON.stringify(body) : undefined,
   });
-  
-  const data = await response.json();
-  
+
   if (!response.ok) {
-    throw new Error(data.message || 'API error');
+    throw new Error(`Supabase error: ${response.status}`);
   }
-  
-  return data;
+
+  // For DELETE or PATCH with no return
+  if (response.status === 204 || response.headers.get('content-length') === '0') {
+    return null;
+  }
+
+  return response.json();
 }
 
 // Auth API
 export const authApi = {
   login: async (username: string, password: string) => {
-    const data = await fetchApi<{ status: string; token: string; user: User }>('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ username, password }),
+    const users = await supabaseRequest('users', {
+      query: `username=eq.${username}&password=eq.${password}&select=*`
     });
-    setToken(data.token);
-    return data;
-  },
-  
-  logout: () => {
-    setToken(null);
-  },
-  
-  getMe: () => fetchApi<{ status: string; user: User }>('/api/auth/me'),
-  
-  changePassword: (currentPassword: string, newPassword: string) =>
-    fetchApi<ApiResponse<void>>('/api/auth/change-password', {
-      method: 'POST',
-      body: JSON.stringify({ currentPassword, newPassword }),
-    }),
+    
+    if (users && users.length > 0) {
+      const token = btoa(JSON.stringify({ userId: users[0].id, username }));
+      return { success: true, token, user: users[0] };
+    }
+    throw new Error('Invalid credentials');
+  }
 };
 
 // Hives API
 export const hivesApi = {
-  getAll: () => fetchApi<{ status: string; hives: Hive[] }>('/api/hives'),
+  getAll: async () => {
+    return supabaseRequest('hives', { query: 'select=*&order=id' });
+  },
   
-  getOne: (id: number, range = '24h') => 
-    fetchApi<{ status: string; hive: Hive }>(`/api/hives/${id}?range=${range}`),
+  update: async (id: number, data: { name: string }) => {
+    return supabaseRequest('hives', {
+      method: 'PATCH',
+      query: `id=eq.${id}`,
+      body: data
+    });
+  },
   
-  update: (id: number, name: string) =>
-    fetchApi<{ status: string; hive: Hive }>(`/api/hives/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ name }),
-    }),
-  
-  regenerateKey: (id: number) =>
-    fetchApi<{ status: string; api_key: string }>(`/api/hives/${id}/regenerate-key`, {
-      method: 'POST',
-    }),
+  getReadings: async (hiveId: number, range: string = '24h') => {
+    let timeFilter = '';
+    const now = new Date();
+    
+    if (range === '24h') {
+      const past = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      timeFilter = `&recorded_at=gte.${past.toISOString()}`;
+    } else if (range === '7d') {
+      const past = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      timeFilter = `&recorded_at=gte.${past.toISOString()}`;
+    } else if (range === '30d') {
+      const past = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      timeFilter = `&recorded_at=gte.${past.toISOString()}`;
+    }
+    
+    return supabaseRequest('readings', {
+      query: `hive_id=eq.${hiveId}${timeFilter}&order=recorded_at.desc&limit=100`
+    });
+  }
 };
 
 // Readings API
 export const readingsApi = {
-  getAll: (params?: { hive_id?: number; start_date?: string; end_date?: string; limit?: number }) => {
-    const queryParams = new URLSearchParams();
-    if (params?.hive_id) queryParams.set('hive_id', params.hive_id.toString());
-    if (params?.start_date) queryParams.set('start_date', params.start_date);
-    if (params?.end_date) queryParams.set('end_date', params.end_date);
-    if (params?.limit) queryParams.set('limit', params.limit.toString());
-    return fetchApi<{ status: string; readings: Reading[] }>(`/api/readings?${queryParams}`);
+  getLatest: async () => {
+    const hives = await hivesApi.getAll();
+    const result: Record<number, unknown> = {};
+    
+    for (const hive of hives) {
+      const readings = await supabaseRequest('readings', {
+        query: `hive_id=eq.${hive.id}&order=recorded_at.desc&limit=1`
+      });
+      if (readings && readings.length > 0) {
+        result[hive.id] = readings[0];
+      }
+    }
+    
+    return result;
   },
   
-  getLatest: () => fetchApi<{ status: string; readings: Reading[] }>('/api/readings/latest'),
-  
-  getChart: (hours = 24, hive_id?: number) => {
-    const params = new URLSearchParams({ hours: hours.toString() });
-    if (hive_id) params.set('hive_id', hive_id.toString());
-    return fetchApi<{ status: string; readings: Reading[] }>(`/api/readings/chart?${params}`);
-  },
+  create: async (data: { api_key: string; temperature: number; humidity?: number; weight?: number }) => {
+    // Find hive by API key
+    const hives = await supabaseRequest('hives', {
+      query: `api_key=eq.${data.api_key}&select=id`
+    });
+    
+    if (!hives || hives.length === 0) {
+      throw new Error('Invalid API key');
+    }
+    
+    return supabaseRequest('readings', {
+      method: 'POST',
+      body: {
+        hive_id: hives[0].id,
+        temperature: data.temperature,
+        humidity: data.humidity || null,
+        weight: data.weight || null,
+        recorded_at: new Date().toISOString()
+      }
+    });
+  }
 };
 
 // LVD API
 export const lvdApi = {
-  get: () => fetchApi<{ status: string; lvd: LVDData | null; settings: LVDSettings }>('/api/lvd'),
+  getStatus: async () => {
+    const status = await supabaseRequest('lvd_status', {
+      query: 'order=recorded_at.desc&limit=1'
+    });
+    return status && status.length > 0 ? status[0] : null;
+  },
   
-  getSettings: () => fetchApi<{ status: string } & LVDSettings>('/api/lvd/settings'),
+  getSettings: async () => {
+    const settings = await supabaseRequest('lvd_settings', {
+      query: 'limit=1'
+    });
+    return settings && settings.length > 0 ? settings[0] : null;
+  },
   
-  updateSettings: (settings: Partial<LVDSettings>) =>
-    fetchApi<{ status: string; settings: LVDSettings }>('/api/lvd/settings', {
-      method: 'PUT',
-      body: JSON.stringify(settings),
-    }),
+  updateSettings: async (data: { disconnect_voltage: number; reconnect_voltage: number; is_enabled: boolean }) => {
+    // Get existing settings ID
+    const settings = await lvdApi.getSettings();
+    if (settings) {
+      return supabaseRequest('lvd_settings', {
+        method: 'PATCH',
+        query: `id=eq.${settings.id}`,
+        body: { ...data, updated_at: new Date().toISOString() }
+      });
+    }
+    return supabaseRequest('lvd_settings', {
+      method: 'POST',
+      body: data
+    });
+  },
   
-  getHistory: (hours = 24) =>
-    fetchApi<{ status: string; readings: LVDData[] }>(`/api/lvd/history?hours=${hours}`),
+  postStatus: async (data: { battery_voltage: number; battery_percent: number; is_connected: boolean }) => {
+    return supabaseRequest('lvd_status', {
+      method: 'POST',
+      body: { ...data, recorded_at: new Date().toISOString() }
+    });
+  }
 };
 
 // Export API
 export const exportApi = {
-  getStats: () => fetchApi<{ 
-    status: string; 
-    stats: { 
-      total_readings: number; 
-      first_reading: string; 
-      last_reading: string;
-    } 
-  }>('/api/export/stats'),
-  
-  downloadCsv: async (params?: { hive_id?: string; start_date?: string; end_date?: string }) => {
-    const queryParams = new URLSearchParams();
-    if (params?.hive_id) queryParams.set('hive_id', params.hive_id);
-    if (params?.start_date) queryParams.set('start_date', params.start_date);
-    if (params?.end_date) queryParams.set('end_date', params.end_date);
+  downloadCSV: async (hiveId: string, startDate: string, endDate: string) => {
+    let query = `recorded_at=gte.${startDate}T00:00:00&recorded_at=lte.${endDate}T23:59:59&order=recorded_at.desc`;
     
-    const response = await fetch(`${API_URL}/api/export/csv?${queryParams}`, {
-      headers: { Authorization: `Bearer ${authToken}` },
-    });
+    if (hiveId !== 'all') {
+      query += `&hive_id=eq.${hiveId}`;
+    }
     
-    if (!response.ok) throw new Error('Export failed');
+    const readings = await supabaseRequest('readings', { query: `select=*,hives(name)&${query}` });
+    const hives = await hivesApi.getAll();
+    const hiveMap: Record<number, string> = {};
+    hives.forEach((h: { id: number; name: string }) => { hiveMap[h.id] = h.name; });
     
-    const blob = await response.blob();
+    // Generate CSV
+    let csv = 'Hive,Temperature (°C),Humidity (%),Weight (kg),Recorded At\n';
+    
+    for (const r of readings) {
+      const hiveName = hiveMap[r.hive_id] || 'Unknown';
+      csv += `${hiveName},${r.temperature || ''},${r.humidity || ''},${r.weight || ''},${r.recorded_at}\n`;
+    }
+    
+    // Download
+    const blob = new Blob([csv], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `beehive_export_${new Date().toISOString().split('T')[0]}.csv`;
-    document.body.appendChild(a);
+    a.download = `beehive-export-${startDate}-to-${endDate}.csv`;
     a.click();
     window.URL.revokeObjectURL(url);
-    a.remove();
-  },
+  }
+};
+
+// Settings API
+export const settingsApi = {
+  changePassword: async (currentPassword: string, newPassword: string) => {
+    // Verify current password
+    const users = await supabaseRequest('users', {
+      query: `username=eq.admin&password=eq.${currentPassword}`
+    });
+    
+    if (!users || users.length === 0) {
+      throw new Error('Current password is incorrect');
+    }
+    
+    // Update password
+    return supabaseRequest('users', {
+      method: 'PATCH',
+      query: `id=eq.${users[0].id}`,
+      body: { password: newPassword }
+    });
+  }
 };
